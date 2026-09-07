@@ -54,11 +54,11 @@ STORIES_MAPPING = [
 # ==================== 3. Helper Functions ====================
 
 def search_and_download_youtube(query: str, output_filename: str = "temp_video.mp4") -> str:
-    """البحث في يوتيوب وتحميل الفيديو مع تجاوز قيود السيرفرات السحابية"""
+    """البحث في يوتيوب وتحميل الفيديو عبر التغلب على حظر البوتات في GitHub Actions"""
     print(f"🔍 جاري البحث في يوتيوب عن: {query}")
     
     ydl_opts = {
-        'format': 'best',
+        'format': 'b/best',
         'default_search': 'ytsearch1:',
         'outtmpl': output_filename,
         'quiet': True,
@@ -66,13 +66,16 @@ def search_and_download_youtube(query: str, output_filename: str = "temp_video.m
         'nocheckcertificate': True,
         'ignoreerrors': False,
         'logtostderr': False,
-        'addheader': [
-            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        ],
+        'geo_bypass': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web']
+                'player_client': ['ios', 'mweb', 'tvhtml5'],
+                'skip': ['hls', 'dash']
             }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1',
+            'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
         }
     }
     
