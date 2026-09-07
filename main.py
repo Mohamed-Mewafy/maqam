@@ -5,21 +5,21 @@ from supabase import create_client, Client
 from yt_dlp import YoutubeDL
 from telegram import Bot
 
-# تحميل المتغيرات من ملف .env محلياً إن وجد
+# تحميل المتغيرات البيئية من ملف .env محلياً إن وجد
 load_dotenv()
 
-# ==================== 1. Configuration (مخفية بالكامل) ====================
+# ==================== 1. Configuration ====================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 if not all([SUPABASE_URL, SUPABASE_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
-    raise ValueError("❌ خطأ: بعض المتغيرات البيئية مفقودة! تأكد من ضبط .env أو GitHub Secrets.")
+    raise ValueError("❌ خطأ: بعض المتغيرات البيئية مفقودة! تأكد من ضبط .env محلياً أو GitHub Secrets.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ==================== 2. تعريف قصص القرآن ونطاق الآيات ====================
+# ==================== 2. قصص القرآن ونطاق الآيات ====================
 STORIES_MAPPING = [
     {
         "story_title": "قصة أصحاب الكهف",
@@ -54,14 +54,28 @@ STORIES_MAPPING = [
 # ==================== 3. Helper Functions ====================
 
 def search_and_download_youtube(query: str, output_filename: str = "temp_video.mp4") -> str:
+    """البحث في يوتيوب وتحميل الفيديو مع تجاوز قيود السيرفرات السحابية"""
     print(f"🔍 جاري البحث في يوتيوب عن: {query}")
+    
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'best',
         'default_search': 'ytsearch1:',
         'outtmpl': output_filename,
         'quiet': True,
         'noplaylist': True,
+        'nocheckcertificate': True,
+        'ignoreerrors': False,
+        'logtostderr': False,
+        'addheader': [
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        ],
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web']
+            }
+        }
     }
+    
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(query, download=True)
         if 'entries' in info and len(info['entries']) > 0:
@@ -69,8 +83,10 @@ def search_and_download_youtube(query: str, output_filename: str = "temp_video.m
             return output_filename
     return None
 
+
 async def upload_to_telegram(bot: Bot, file_path: str, caption: str) -> str:
-    print(f"📤 جاري رفع الفيديو إلى تليجرام...")
+    """رفع الفيديو إلى تليجرام واستخراج رابط الملف المباشر"""
+    print("📤 جاري رفع الفيديو إلى تليجرام...")
     with open(file_path, 'rb') as video_file:
         message = await bot.send_video(
             chat_id=TELEGRAM_CHAT_ID,
@@ -78,18 +94,24 @@ async def upload_to_telegram(bot: Bot, file_path: str, caption: str) -> str:
             caption=caption,
             supports_streaming=True
         )
+    
     file_id = message.video.file_id
     tg_file = await bot.get_file(file_id)
+    print(f"🎉 تم الرفع بنجاح! الرابط: {tg_file.file_path}")
     return tg_file.file_path
 
+
 async def link_story_to_supabase(surah_number: int, start_ayah: int, end_ayah: int, story_title: str, video_url: str):
+    """ربط رابط الفيديو بكل الآيات الواقعة ضمن نطاق القصة في Supabase"""
     print(f"🔗 جاري ربط الفيديو بالآيات من {start_ayah} إلى {end_ayah} في سورة رقم {surah_number}...")
+    
     surah_res = supabase.from_('surahs').select('id').eq('surah_number', surah_number).single().execute()
     if not surah_res.data:
         print(f"❌ لم يتم العثور على السورة رقم {surah_number}")
         return
         
     surah_id = surah_res.data['id']
+
     ayahs_res = supabase.from_('ayahs') \
         .select('id, number_in_surah') \
         .eq('surah_id', surah_id) \
@@ -97,15 +119,24 @@ async def link_story_to_supabase(surah_number: int, start_ayah: int, end_ayah: i
         .lte('number_in_surah', end_ayah) \
         .execute()
 
-    for ayah in ayahs_res.data:
+    ayahs = ayahs_res.data
+    print(f"📌 تم العثور على {len(ayahs)} آية لربطها بالقصة.")
+
+    for ayah in ayahs:
         existing = supabase.from_('ayahs_stories').select('id').eq('ayah_id', ayah['id']).execute()
-        data = {'ayah_id': ayah['id'], 'title': story_title, 'video_url': video_url}
+        
+        data = {
+            'ayah_id': ayah['id'],
+            'title': story_title,
+            'video_url': video_url
+        }
+        
         if existing.data and len(existing.data) > 0:
             supabase.from_('ayahs_stories').update(data).eq('ayah_id', ayah['id']).execute()
         else:
             supabase.from_('ayahs_stories').insert(data).execute()
 
-    print(f"✅ تم ربط القصة بنجاح مع {len(ayahs_res.data)} آية!")
+    print("✅ تم ربط جميع آيات القصة بنجاح!")
 
 # ==================== 4. Main Processing Loop ====================
 
@@ -113,17 +144,19 @@ async def main():
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
     for story in STORIES_MAPPING:
-        print(f"\n==================================================")
+        print("\n==================================================")
         print(f"🚀 بدء معالجة: {story['story_title']}")
         
+        # فحص ما إذا كانت القصة معالجة مسبقاً لمنع التكرار
         surah_res = supabase.from_('surahs').select('id').eq('surah_number', story['surah_number']).single().execute()
         if surah_res.data:
             surah_id = surah_res.data['id']
             first_ayah = supabase.from_('ayahs').select('id').eq('surah_id', surah_id).eq('number_in_surah', story['start_ayah']).single().execute()
+            
             if first_ayah.data:
                 existing_story = supabase.from_('ayahs_stories').select('video_url').eq('ayah_id', first_ayah.data['id']).execute()
                 if existing_story.data and len(existing_story.data) > 0 and existing_story.data[0].get('video_url'):
-                    print(f"⚡ القصة مضافة بالفعل من قبل. تخطي...")
+                    print("⚡ القصة مضافة بالفعل من قبل. تخطي...")
                     continue
 
         temp_file = f"temp_{story['surah_number']}_{story['start_ayah']}.mp4"
