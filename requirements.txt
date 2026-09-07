@@ -1,0 +1,4 @@
+supabase
+yt-dlp
+python-telegram-bot
+python-dotenv
