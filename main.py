@@ -1,6 +1,7 @@
 import asyncio
 import glob
 import os
+import re
 import traceback
 from typing import Optional
 
@@ -11,12 +12,15 @@ from yt_dlp import YoutubeDL
 
 
 # ============================================================
-# 1. تحميل Environment Variables
+# 1. Environment Variables
 # ============================================================
 
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
+
+# يفضل استخدام Service Role في Backend / GitHub Actions
+# وسيتم الرجوع إلى ANON_KEY إذا لم يكن Service Role موجودًا.
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv(
     "SUPABASE_ANON_KEY"
 )
@@ -34,8 +38,8 @@ if not all(
     ]
 ):
     raise ValueError(
-        "❌ خطأ: بعض المتغيرات البيئية مفقودة!\n"
-        "تأكد من وجود:\n"
+        "❌ خطأ: بعض Environment Variables مفقودة!\n\n"
+        "المطلوب:\n"
         "SUPABASE_URL\n"
         "SUPABASE_SERVICE_ROLE_KEY أو SUPABASE_ANON_KEY\n"
         "TELEGRAM_BOT_TOKEN\n"
@@ -50,7 +54,25 @@ supabase: Client = create_client(
 
 
 # ============================================================
-# 2. قصص القرآن ونطاق الآيات
+# 2. إعدادات التحميل
+# ============================================================
+
+# عدد نتائج البحث التي سيتم تجربتها
+SEARCH_RESULTS = 5
+
+# أقصى مدة للفيديو بالثواني.
+# None = بدون حد.
+MAX_VIDEO_DURATION = 60 * 30  # 30 دقيقة
+
+# أقل مدة مقبولة.
+MIN_VIDEO_DURATION = 20
+
+# الحد الأقصى المقترح للجودة
+MAX_HEIGHT = 1080
+
+
+# ============================================================
+# 3. قصص القرآن
 # ============================================================
 
 STORIES_MAPPING = [
@@ -59,7 +81,7 @@ STORIES_MAPPING = [
         "surah_number": 18,
         "start_ayah": 9,
         "end_ayah": 26,
-        "search_query": "قصة أصحاب الكهف ملخصة فيديو قصير",
+        "search_query": "قصة أصحاب الكهف ملخصة",
     },
     {
         "story_title": "قصة صاحب الجنتين",
@@ -86,13 +108,36 @@ STORIES_MAPPING = [
 
 
 # ============================================================
-# 3. Helpers
+# 4. تنظيف أسماء الملفات
+# ============================================================
+
+def safe_filename(value: str) -> str:
+    """
+    تحويل النص إلى اسم ملف آمن.
+    """
+
+    value = re.sub(
+        r'[<>:"/\\|?*]',
+        "_",
+        value,
+    )
+
+    value = re.sub(
+        r"\s+",
+        "_",
+        value,
+    )
+
+    return value[:100]
+
+
+# ============================================================
+# 5. تنظيف الملفات المؤقتة
 # ============================================================
 
 def cleanup_temp_files(base_name: str) -> None:
     """
-    حذف جميع الملفات المؤقتة المرتبطة باسم التحميل.
-    يمنع استخدام ملفات قديمة بالخطأ.
+    حذف الملفات المؤقتة الناتجة عن yt-dlp.
     """
 
     patterns = [
@@ -100,22 +145,35 @@ def cleanup_temp_files(base_name: str) -> None:
     ]
 
     for pattern in patterns:
+
         for file_path in glob.glob(pattern):
+
             try:
+
                 if os.path.isfile(file_path):
+
                     os.remove(file_path)
-                    print(f"🧹 تم حذف الملف المؤقت: {file_path}")
+
+                    print(
+                        f"🧹 تم حذف الملف: "
+                        f"{file_path}"
+                    )
+
             except Exception as e:
+
                 print(
-                    f"⚠️ تعذر حذف الملف المؤقت {file_path}: {e}"
+                    f"⚠️ تعذر حذف "
+                    f"{file_path}: {e}"
                 )
 
 
-def find_downloaded_video(base_name: str) -> Optional[str]:
-    """
-    البحث عن الفيديو النهائي فقط.
-    يستبعد الملفات المؤقتة الخاصة بـ yt-dlp.
-    """
+# ============================================================
+# 6. العثور على الفيديو النهائي
+# ============================================================
+
+def find_downloaded_video(
+    base_name: str,
+) -> Optional[str]:
 
     allowed_extensions = {
         ".mp4",
@@ -131,7 +189,9 @@ def find_downloaded_video(base_name: str) -> Optional[str]:
         ".tmp",
     }
 
-    files = glob.glob(f"{base_name}.*")
+    files = glob.glob(
+        f"{base_name}.*"
+    )
 
     valid_files = []
 
@@ -140,7 +200,12 @@ def find_downloaded_video(base_name: str) -> Optional[str]:
         if not os.path.isfile(file_path):
             continue
 
-        extension = os.path.splitext(file_path)[1].lower()
+        extension = (
+            os.path.splitext(
+                file_path
+            )[1]
+            .lower()
+        )
 
         if extension in ignored_extensions:
             continue
@@ -148,15 +213,27 @@ def find_downloaded_video(base_name: str) -> Optional[str]:
         if extension not in allowed_extensions:
             continue
 
-        if os.path.getsize(file_path) <= 0:
+        try:
+
+            size = os.path.getsize(
+                file_path
+            )
+
+            if size <= 0:
+                continue
+
+        except OSError:
+
             continue
 
-        valid_files.append(file_path)
+        valid_files.append(
+            file_path
+        )
 
     if not valid_files:
         return None
 
-    # نختار أكبر ملف فيديو عادةً يكون الملف النهائي
+    # الأكبر غالبًا هو الملف النهائي
     valid_files.sort(
         key=lambda path: os.path.getsize(path),
         reverse=True,
@@ -166,146 +243,317 @@ def find_downloaded_video(base_name: str) -> Optional[str]:
 
 
 # ============================================================
-# 4. البحث وتحميل فيديو YouTube
+# 7. تقييم نتائج YouTube
 # ============================================================
 
-def search_and_download_youtube(
+def score_video(
+    video: dict,
     query: str,
-    output_filename: str,
-) -> Optional[str]:
+) -> int:
+
+    title = (
+        video.get("title")
+        or ""
+    ).lower()
+
+    score = 0
+
+    # --------------------------------------------------------
+    # كلمات البحث
+    # --------------------------------------------------------
+
+    query_words = [
+        word.strip().lower()
+        for word in query.split()
+        if len(word.strip()) >= 3
+    ]
+
+    for word in query_words:
+
+        if word in title:
+
+            score += 10
+
+    # --------------------------------------------------------
+    # كلمات مرغوبة
+    # --------------------------------------------------------
+
+    preferred_words = [
+        "قصة",
+        "القرآن",
+        "سورة",
+        "اسلام",
+        "إسلام",
+        "قصص",
+        "عبرة",
+        "عبر",
+        "قصص القرآن",
+    ]
+
+    for word in preferred_words:
+
+        if word.lower() in title:
+
+            score += 5
+
+    # --------------------------------------------------------
+    # كلمات غير مرغوبة
+    # --------------------------------------------------------
+
+    unwanted_words = [
+        "shorts",
+        "short",
+        "تيك توك",
+        "tiktok",
+        "ريلز",
+        "reels",
+        "reaction",
+        "رد فعل",
+        "موسيقى",
+        "اغنية",
+        "أغنية",
+    ]
+
+    for word in unwanted_words:
+
+        if word in title:
+
+            score -= 30
+
+    # --------------------------------------------------------
+    # مدة الفيديو
+    # --------------------------------------------------------
+
+    duration = video.get(
+        "duration"
+    )
+
+    if duration:
+
+        if (
+            MIN_VIDEO_DURATION
+            <= duration
+            <= MAX_VIDEO_DURATION
+        ):
+
+            score += 15
+
+        elif duration < MIN_VIDEO_DURATION:
+
+            score -= 20
+
+        elif duration > MAX_VIDEO_DURATION:
+
+            score -= 20
+
+    # --------------------------------------------------------
+    # عدد المشاهدات
+    # --------------------------------------------------------
+
+    view_count = video.get(
+        "view_count"
+    )
+
+    if view_count:
+
+        if view_count >= 1_000_000:
+            score += 15
+
+        elif view_count >= 100_000:
+            score += 10
+
+        elif view_count >= 10_000:
+            score += 5
+
+    # --------------------------------------------------------
+    # تقييم القناة
+    # --------------------------------------------------------
+
+    channel = (
+        video.get("channel")
+        or video.get("uploader")
+        or ""
+    ).lower()
+
+    if any(
+        word in channel
+        for word in [
+            "قرآن",
+            "القران",
+            "quran",
+            "اسلام",
+            "islam",
+        ]
+    ):
+
+        score += 5
+
+    return score
+
+
+# ============================================================
+# 8. البحث عن أفضل فيديو
+# ============================================================
+
+def search_best_youtube_video(
+    query: str,
+) -> Optional[dict]:
 
     print()
-    print(f"🔍 البحث في يوتيوب عن:")
-    print(f"   {query}")
+    print(
+        f"🔎 البحث عن أفضل فيديو:"
+    )
+    print(
+        f"   {query}"
+    )
 
-    base_name = os.path.splitext(output_filename)[0]
-
-    # تنظيف أي ملفات قديمة قبل بدء التحميل
-    cleanup_temp_files(base_name)
-
-    output_template = f"{base_name}.%(ext)s"
+    search_query = (
+        f"ytsearch{SEARCH_RESULTS}:"
+        f"{query}"
+    )
 
     ydl_opts = {
-        # نفضل MP4 حتى يكون مناسبًا للرفع والتشغيل
-        "format": (
-            "bestvideo[ext=mp4][height<=1080]+"
-            "bestaudio[ext=m4a]/"
-            "best[ext=mp4][height<=1080]/"
-            "best"
-        ),
-
-        "merge_output_format": "mp4",
-
-        # البحث عن أول نتيجة
-        "default_search": "ytsearch1:",
-
-        "outtmpl": output_template,
-
         "quiet": True,
-
+        "no_warnings": True,
         "noplaylist": True,
 
-        # لا نعطل التحقق من SSL
-        "nocheckcertificate": False,
+        "extract_flat": True,
 
-        "geo_bypass": True,
+        "skip_download": True,
 
-        "http_headers": {
-            "Accept-Language": "ar,en;q=0.8",
-        },
+        "retries": 3,
     }
 
-    # استخدام cookies.txt فقط إذا كان موجودًا
     cookies_file = "cookies.txt"
 
-    if os.path.exists(cookies_file):
-        ydl_opts["cookiefile"] = cookies_file
+    if os.path.exists(
+        cookies_file
+    ):
+
+        ydl_opts["cookiefile"] = (
+            cookies_file
+        )
 
     try:
 
-        with YoutubeDL(ydl_opts) as ydl:
+        with YoutubeDL(
+            ydl_opts
+        ) as ydl:
 
-            info = ydl.extract_info(
+            result = ydl.extract_info(
+                search_query,
+                download=False,
+            )
+
+        if not result:
+
+            print(
+                "❌ لم يتم الحصول "
+                "على نتائج."
+            )
+
+            return None
+
+        entries = (
+            result.get("entries")
+            or []
+        )
+
+        if not entries:
+
+            print(
+                "❌ لا توجد نتائج."
+            )
+
+            return None
+
+        candidates = []
+
+        print()
+        print(
+            f"📋 تم العثور على "
+            f"{len(entries)} نتائج:"
+        )
+
+        for index, video in enumerate(
+            entries,
+            start=1,
+        ):
+
+            if not video:
+                continue
+
+            title = (
+                video.get("title")
+                or "بدون عنوان"
+            )
+
+            duration = (
+                video.get("duration")
+                or 0
+            )
+
+            views = (
+                video.get("view_count")
+                or 0
+            )
+
+            score = score_video(
+                video,
                 query,
-                download=True,
             )
 
-            if not info:
-                print("❌ yt-dlp لم يرجع أي معلومات.")
-                return None
-
-            # إذا كانت نتيجة بحث
-            if "entries" in info:
-
-                entries = info.get("entries") or []
-
-                if not entries:
-                    print("❌ لم يتم العثور على أي فيديو.")
-                    return None
-
-                video_info = entries[0]
-
-            else:
-                video_info = info
-
-            title = video_info.get(
-                "title",
-                "عنوان غير معروف",
+            print()
+            print(
+                f"{index}. {title}"
+            )
+            print(
+                f"   ⏱️ {duration} ثانية"
+            )
+            print(
+                f"   👁️ {views:,} مشاهدة"
+            )
+            print(
+                f"   ⭐ Score: {score}"
             )
 
-            webpage_url = video_info.get(
-                "webpage_url",
-                "",
-            )
-
-            duration = video_info.get(
-                "duration",
-                0,
-            )
-
-            print(f"🎬 الفيديو المختار: {title}")
-
-            if webpage_url:
-                print(f"🔗 المصدر: {webpage_url}")
-
-            if duration:
-                print(f"⏱️ المدة: {duration} ثانية")
-
-            # التأكد من وجود الفيديو النهائي
-            actual_file = find_downloaded_video(
-                base_name
-            )
-
-            if not actual_file:
-
-                print(
-                    "❌ تم التحميل ولكن لم يتم العثور "
-                    "على ملف فيديو نهائي."
+            candidates.append(
+                (
+                    score,
+                    video,
                 )
-
-                return None
-
-            print(
-                f"✅ تم تحميل الفيديو بنجاح:\n"
-                f"   {actual_file}"
             )
 
-            file_size_mb = (
-                os.path.getsize(actual_file)
-                / (1024 * 1024)
-            )
+        if not candidates:
 
-            print(
-                f"📦 حجم الملف: "
-                f"{file_size_mb:.2f} MB"
-            )
+            return None
 
-            return actual_file
+        candidates.sort(
+            key=lambda item: item[0],
+            reverse=True,
+        )
+
+        best_score, best_video = (
+            candidates[0]
+        )
+
+        print()
+        print(
+            "🏆 أفضل نتيجة:"
+        )
+        print(
+            f"   {best_video.get('title')}"
+        )
+        print(
+            f"⭐ Score: {best_score}"
+        )
+
+        return best_video
 
     except Exception as e:
 
         print(
-            f"❌ حدث خطأ أثناء تحميل الفيديو:"
+            f"❌ خطأ أثناء البحث:"
             f"\n{e}"
         )
 
@@ -315,7 +563,355 @@ def search_and_download_youtube(
 
 
 # ============================================================
-# 5. رفع الفيديو إلى Telegram
+# 9. تحميل الفيديو
+# ============================================================
+
+def download_youtube_video(
+    video: dict,
+    output_filename: str,
+) -> Optional[str]:
+
+    base_name = os.path.splitext(
+        output_filename
+    )[0]
+
+    cleanup_temp_files(
+        base_name
+    )
+
+    video_url = (
+        video.get("webpage_url")
+        or video.get("url")
+    )
+
+    if not video_url:
+
+        video_id = video.get(
+            "id"
+        )
+
+        if video_id:
+
+            video_url = (
+                f"https://www.youtube.com/watch?v="
+                f"{video_id}"
+            )
+
+    if not video_url:
+
+        print(
+            "❌ لم يتم العثور على "
+            "رابط الفيديو."
+        )
+
+        return None
+
+    print()
+    print(
+        "⬇️ بدء تحميل الفيديو:"
+    )
+    print(
+        f"🔗 {video_url}"
+    )
+
+    output_template = (
+        f"{base_name}.%(ext)s"
+    )
+
+    ydl_opts = {
+
+        # ----------------------------------------------------
+        # Format مرن
+        # ----------------------------------------------------
+        "format": (
+            f"bv*[height<={MAX_HEIGHT}]"
+            "+ba/"
+            f"b[height<={MAX_HEIGHT}]/"
+            "b"
+        ),
+
+        # محاولة الدمج إلى MP4
+        "merge_output_format": "mp4",
+
+        "outtmpl": output_template,
+
+        "noplaylist": True,
+
+        "quiet": False,
+
+        "no_warnings": False,
+
+        # ----------------------------------------------------
+        # Retry
+        # ----------------------------------------------------
+        "retries": 5,
+
+        "fragment_retries": 5,
+
+        "file_access_retries": 3,
+
+        "retry_sleep_functions": {
+            "http": lambda n: min(
+                5 * (n + 1),
+                30,
+            ),
+        },
+
+        "skip_unavailable_fragments": True,
+
+        # ----------------------------------------------------
+        # Headers
+        # ----------------------------------------------------
+        "http_headers": {
+            "Accept-Language": (
+                "ar,en;q=0.8"
+            ),
+        },
+
+        # ----------------------------------------------------
+        # SSL طبيعي
+        # ----------------------------------------------------
+        "nocheckcertificate": False,
+
+        # ----------------------------------------------------
+        # Geo bypass
+        # ----------------------------------------------------
+        "geo_bypass": True,
+    }
+
+    cookies_file = "cookies.txt"
+
+    if os.path.exists(
+        cookies_file
+    ):
+
+        ydl_opts["cookiefile"] = (
+            cookies_file
+        )
+
+    try:
+
+        with YoutubeDL(
+            ydl_opts
+        ) as ydl:
+
+            ydl.download(
+                [
+                    video_url
+                ]
+            )
+
+        actual_file = (
+            find_downloaded_video(
+                base_name
+            )
+        )
+
+        if not actual_file:
+
+            print(
+                "❌ انتهى yt-dlp "
+                "ولكن الملف غير موجود."
+            )
+
+            return None
+
+        file_size = os.path.getsize(
+            actual_file
+        )
+
+        if file_size <= 0:
+
+            print(
+                "❌ ملف الفيديو فارغ."
+            )
+
+            return None
+
+        size_mb = (
+            file_size
+            / (1024 * 1024)
+        )
+
+        print()
+        print(
+            "✅ تم تحميل الفيديو!"
+        )
+        print(
+            f"📁 {actual_file}"
+        )
+        print(
+            f"📦 الحجم: {size_mb:.2f} MB"
+        )
+
+        return actual_file
+
+    except Exception as e:
+
+        print()
+        print(
+            "❌ فشل تحميل الفيديو:"
+        )
+        print(e)
+
+        traceback.print_exc()
+
+        cleanup_temp_files(
+            base_name
+        )
+
+        return None
+
+
+# ============================================================
+# 10. البحث + التحميل
+# ============================================================
+
+def search_and_download_youtube(
+    query: str,
+    output_filename: str,
+) -> Optional[str]:
+
+    # --------------------------------------------------------
+    # البحث عن أفضل نتيجة
+    # --------------------------------------------------------
+
+    best_video = (
+        search_best_youtube_video(
+            query
+        )
+    )
+
+    if not best_video:
+
+        return None
+
+    # --------------------------------------------------------
+    # تحميل النتيجة الأفضل
+    # --------------------------------------------------------
+
+    downloaded = (
+        download_youtube_video(
+            best_video,
+            output_filename,
+        )
+    )
+
+    if downloaded:
+
+        return downloaded
+
+    # --------------------------------------------------------
+    # إذا فشل التحميل، نحاول نتائج أخرى
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "⚠️ فشل تحميل أفضل نتيجة."
+    )
+    print(
+        "🔄 سيتم محاولة نتائج أخرى..."
+    )
+
+    search_query = (
+        f"ytsearch{SEARCH_RESULTS}:"
+        f"{query}"
+    )
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "extract_flat": True,
+        "skip_download": True,
+    }
+
+    try:
+
+        with YoutubeDL(
+            ydl_opts
+        ) as ydl:
+
+            result = ydl.extract_info(
+                search_query,
+                download=False,
+            )
+
+        entries = (
+            result.get("entries")
+            or []
+        )
+
+        candidates = []
+
+        for video in entries:
+
+            if not video:
+                continue
+
+            score = score_video(
+                video,
+                query,
+            )
+
+            candidates.append(
+                (
+                    score,
+                    video,
+                )
+            )
+
+        candidates.sort(
+            key=lambda item: item[0],
+            reverse=True,
+        )
+
+        for index, (
+            score,
+            video,
+        ) in enumerate(
+            candidates,
+            start=1,
+        ):
+
+            # تخطي النتيجة التي جربناها أولًا
+            if index == 1:
+                continue
+
+            print()
+            print(
+                f"🔄 محاولة فيديو بديل "
+                f"{index}:"
+            )
+            print(
+                f"🎬 {video.get('title')}"
+            )
+
+            downloaded = (
+                download_youtube_video(
+                    video,
+                    output_filename,
+                )
+            )
+
+            if downloaded:
+
+                return downloaded
+
+    except Exception as e:
+
+        print(
+            f"❌ خطأ أثناء تجربة "
+            f"النتائج البديلة: {e}"
+        )
+
+        traceback.print_exc()
+
+    return None
+
+
+# ============================================================
+# 11. رفع Telegram
 # ============================================================
 
 async def upload_to_telegram(
@@ -325,7 +921,9 @@ async def upload_to_telegram(
 ) -> Optional[str]:
 
     print()
-    print("📤 جاري رفع الفيديو إلى Telegram...")
+    print(
+        "📤 جاري رفع الفيديو إلى Telegram..."
+    )
 
     try:
 
@@ -344,27 +942,29 @@ async def upload_to_telegram(
         if not message.video:
 
             print(
-                "❌ Telegram لم يرجع معلومات الفيديو."
+                "❌ Telegram لم يرجع "
+                "بيانات الفيديو."
             )
 
             return None
 
-        file_id = message.video.file_id
+        file_id = (
+            message.video.file_id
+        )
 
         file_unique_id = (
             message.video.file_unique_id
         )
 
+        print()
         print(
-            "🎉 تم الرفع بنجاح!"
+            "🎉 تم رفع الفيديو بنجاح!"
         )
-
         print(
-            f"🆔 Telegram file_id: {file_id}"
+            f"🆔 file_id: {file_id}"
         )
-
         print(
-            f"🔐 Telegram file_unique_id: "
+            f"🔐 file_unique_id: "
             f"{file_unique_id}"
         )
 
@@ -372,10 +972,11 @@ async def upload_to_telegram(
 
     except Exception as e:
 
+        print()
         print(
-            f"❌ فشل رفع الفيديو إلى Telegram:"
-            f"\n{e}"
+            "❌ فشل رفع الفيديو إلى Telegram:"
         )
+        print(e)
 
         traceback.print_exc()
 
@@ -383,7 +984,7 @@ async def upload_to_telegram(
 
 
 # ============================================================
-# 6. جلب السورة
+# 12. الحصول على Surah ID
 # ============================================================
 
 def get_surah_id(
@@ -407,8 +1008,8 @@ def get_surah_id(
         if not response.data:
 
             print(
-                f"❌ لم يتم العثور على السورة "
-                f"رقم {surah_number}"
+                f"❌ لم يتم العثور على "
+                f"السورة رقم {surah_number}"
             )
 
             return None
@@ -418,7 +1019,7 @@ def get_surah_id(
     except Exception as e:
 
         print(
-            f"❌ خطأ أثناء جلب السورة "
+            f"❌ خطأ في جلب السورة "
             f"{surah_number}: {e}"
         )
 
@@ -428,7 +1029,7 @@ def get_surah_id(
 
 
 # ============================================================
-# 7. جلب الآيات
+# 13. الحصول على الآيات
 # ============================================================
 
 def get_ayahs(
@@ -469,8 +1070,9 @@ def get_ayahs(
     except Exception as e:
 
         print(
-            f"❌ خطأ أثناء جلب الآيات: {e}"
+            "❌ خطأ أثناء جلب الآيات:"
         )
+        print(e)
 
         traceback.print_exc()
 
@@ -478,175 +1080,7 @@ def get_ayahs(
 
 
 # ============================================================
-# 8. ربط القصة بالآيات
-# ============================================================
-
-def link_story_to_supabase(
-    surah_number: int,
-    start_ayah: int,
-    end_ayah: int,
-    story_title: str,
-    telegram_file_id: str,
-) -> bool:
-
-    print()
-    print(
-        f"🔗 ربط قصة '{story_title}' "
-        f"بالآيات {start_ayah} - {end_ayah}"
-    )
-
-    # --------------------------------------------------------
-    # جلب السورة
-    # --------------------------------------------------------
-
-    surah_id = get_surah_id(
-        surah_number
-    )
-
-    if not surah_id:
-        return False
-
-    # --------------------------------------------------------
-    # جلب الآيات
-    # --------------------------------------------------------
-
-    ayahs = get_ayahs(
-        surah_id,
-        start_ayah,
-        end_ayah,
-    )
-
-    if not ayahs:
-
-        print(
-            f"⚠️ لم يتم العثور على آيات "
-            f"في النطاق {start_ayah}-{end_ayah}"
-        )
-
-        return False
-
-    print(
-        f"📌 تم العثور على {len(ayahs)} آية."
-    )
-
-    # --------------------------------------------------------
-    # تحديث/إضافة كل آية
-    #
-    # ملاحظة:
-    # ayahs_stories لا يحتوي على UNIQUE(ayah_id)
-    # لذلك لا نستطيع استخدام upsert على ayah_id.
-    #
-    # بدلًا من ذلك:
-    # 1. نبحث هل هناك سجل موجود.
-    # 2. إذا موجود نعمل UPDATE.
-    # 3. إذا غير موجود نعمل INSERT.
-    # --------------------------------------------------------
-
-    success_count = 0
-
-    for ayah in ayahs:
-
-        ayah_id = ayah["id"]
-
-        number_in_surah = ayah[
-            "number_in_surah"
-        ]
-
-        try:
-
-            existing = (
-                supabase
-                .from_("ayahs_stories")
-                .select("id")
-                .eq(
-                    "ayah_id",
-                    ayah_id,
-                )
-                .limit(1)
-                .execute()
-            )
-
-            records = existing.data or []
-
-            if records:
-
-                story_id = records[0]["id"]
-
-                (
-                    supabase
-                    .from_("ayahs_stories")
-                    .update(
-                        {
-                            "title": story_title,
-                            "content": (
-                                f"فيديو {story_title}"
-                            ),
-                            "source": "YouTube",
-                            "telegram_file_id": (
-                                telegram_file_id
-                            ),
-                        }
-                    )
-                    .eq(
-                        "id",
-                        story_id,
-                    )
-                    .execute()
-                )
-
-                print(
-                    f"🔄 تم تحديث الآية "
-                    f"{number_in_surah}"
-                )
-
-            else:
-
-                (
-                    supabase
-                    .from_("ayahs_stories")
-                    .insert(
-                        {
-                            "ayah_id": ayah_id,
-                            "title": story_title,
-                            "content": (
-                                f"فيديو {story_title}"
-                            ),
-                            "source": "YouTube",
-                            "telegram_file_id": (
-                                telegram_file_id
-                            ),
-                        }
-                    )
-                    .execute()
-                )
-
-                print(
-                    f"➕ تم إضافة الآية "
-                    f"{number_in_surah}"
-                )
-
-            success_count += 1
-
-        except Exception as e:
-
-            print(
-                f"❌ فشل ربط الآية "
-                f"{number_in_surah}: {e}"
-            )
-
-            traceback.print_exc()
-
-    print()
-    print(
-        f"✅ تم ربط {success_count} "
-        f"من أصل {len(ayahs)} آية."
-    )
-
-    return success_count == len(ayahs)
-
-
-# ============================================================
-# 9. التحقق هل القصة موجودة بالفعل
+# 14. التحقق من وجود القصة
 # ============================================================
 
 def story_already_exists(
@@ -662,6 +1096,7 @@ def story_already_exists(
         )
 
         if not surah_id:
+
             return False
 
         ayahs = get_ayahs(
@@ -671,6 +1106,7 @@ def story_already_exists(
         )
 
         if not ayahs:
+
             return False
 
         ayah_ids = [
@@ -682,7 +1118,7 @@ def story_already_exists(
             supabase
             .from_("ayahs_stories")
             .select(
-                "id,telegram_file_id"
+                "id,ayah_id,telegram_file_id"
             )
             .in_(
                 "ayah_id",
@@ -691,42 +1127,220 @@ def story_already_exists(
             .execute()
         )
 
-        records = response.data or []
+        records = (
+            response.data or []
+        )
 
-        # إذا كانت كل الآيات لديها نفس الفيديو
-        if len(records) == len(ayahs):
+        # يجب أن تكون كل الآيات موجودة
+        if len(records) != len(
+            ayahs
+        ):
 
-            file_ids = {
-                record.get(
-                    "telegram_file_id"
-                )
-                for record in records
-            }
+            return False
 
-            file_ids.discard(None)
+        # وكلها يجب أن تحتوي على Telegram file_id
+        for record in records:
 
-            if len(file_ids) == 1:
+            if not record.get(
+                "telegram_file_id"
+            ):
 
-                print(
-                    "⏭️ القصة موجودة بالفعل "
-                    "بشكل كامل في Supabase."
-                )
+                return False
 
-                return True
+        print(
+            "⏭️ القصة موجودة بالفعل "
+            "بشكل كامل."
+        )
 
-        return False
+        return True
 
     except Exception as e:
 
         print(
-            f"⚠️ تعذر التحقق من وجود القصة: {e}"
+            f"⚠️ تعذر التحقق من القصة: "
+            f"{e}"
         )
 
         return False
 
 
 # ============================================================
-# 10. معالجة قصة واحدة
+# 15. ربط القصة بالآيات
+# ============================================================
+
+def link_story_to_supabase(
+    surah_number: int,
+    start_ayah: int,
+    end_ayah: int,
+    story_title: str,
+    telegram_file_id: str,
+) -> bool:
+
+    print()
+    print(
+        f"🔗 ربط '{story_title}' "
+        f"بالآيات "
+        f"{start_ayah}-{end_ayah}"
+    )
+
+    # --------------------------------------------------------
+    # الحصول على السورة
+    # --------------------------------------------------------
+
+    surah_id = get_surah_id(
+        surah_number
+    )
+
+    if not surah_id:
+
+        return False
+
+    # --------------------------------------------------------
+    # الحصول على الآيات
+    # --------------------------------------------------------
+
+    ayahs = get_ayahs(
+        surah_id,
+        start_ayah,
+        end_ayah,
+    )
+
+    if not ayahs:
+
+        print(
+            "❌ لم يتم العثور على الآيات."
+        )
+
+        return False
+
+    print(
+        f"📌 عدد الآيات: "
+        f"{len(ayahs)}"
+    )
+
+    success_count = 0
+
+    # --------------------------------------------------------
+    # تحديث أو إضافة كل آية
+    # --------------------------------------------------------
+
+    for ayah in ayahs:
+
+        ayah_id = ayah["id"]
+
+        number_in_surah = (
+            ayah["number_in_surah"]
+        )
+
+        try:
+
+            existing = (
+                supabase
+                .from_("ayahs_stories")
+                .select("id")
+                .eq(
+                    "ayah_id",
+                    ayah_id,
+                )
+                .limit(1)
+                .execute()
+            )
+
+            records = (
+                existing.data or []
+            )
+
+            data = {
+                "ayah_id": ayah_id,
+
+                "title": story_title,
+
+                "content": (
+                    f"فيديو قصة "
+                    f"{story_title}"
+                ),
+
+                "source": "YouTube",
+
+                "telegram_file_id": (
+                    telegram_file_id
+                ),
+            }
+
+            # ------------------------------------------------
+            # تحديث سجل موجود
+            # ------------------------------------------------
+
+            if records:
+
+                story_id = records[0][
+                    "id"
+                ]
+
+                (
+                    supabase
+                    .from_("ayahs_stories")
+                    .update(data)
+                    .eq(
+                        "id",
+                        story_id,
+                    )
+                    .execute()
+                )
+
+                print(
+                    f"🔄 الآية "
+                    f"{number_in_surah} "
+                    f"تم تحديثها."
+                )
+
+            # ------------------------------------------------
+            # إضافة سجل جديد
+            # ------------------------------------------------
+
+            else:
+
+                (
+                    supabase
+                    .from_("ayahs_stories")
+                    .insert(data)
+                    .execute()
+                )
+
+                print(
+                    f"➕ الآية "
+                    f"{number_in_surah} "
+                    f"تمت إضافتها."
+                )
+
+            success_count += 1
+
+        except Exception as e:
+
+            print(
+                f"❌ خطأ في الآية "
+                f"{number_in_surah}:"
+            )
+
+            print(e)
+
+            traceback.print_exc()
+
+    print()
+    print(
+        f"📊 النتيجة: "
+        f"{success_count}/"
+        f"{len(ayahs)}"
+    )
+
+    return (
+        success_count
+        == len(ayahs)
+    )
+
+
+# ============================================================
+# 16. معالجة قصة واحدة
 # ============================================================
 
 async def process_story(
@@ -734,23 +1348,32 @@ async def process_story(
     story: dict,
 ):
 
-    story_title = story["story_title"]
+    story_title = story[
+        "story_title"
+    ]
 
-    surah_number = story["surah_number"]
+    surah_number = story[
+        "surah_number"
+    ]
 
-    start_ayah = story["start_ayah"]
+    start_ayah = story[
+        "start_ayah"
+    ]
 
-    end_ayah = story["end_ayah"]
+    end_ayah = story[
+        "end_ayah"
+    ]
 
     print()
     print("=" * 60)
     print(
-        f"🚀 بدء معالجة: {story_title}"
+        f"🚀 بدء معالجة: "
+        f"{story_title}"
     )
     print("=" * 60)
 
     # --------------------------------------------------------
-    # منع التكرار
+    # منع إعادة معالجة القصة
     # --------------------------------------------------------
 
     if story_already_exists(
@@ -760,17 +1383,17 @@ async def process_story(
     ):
 
         print(
-            f"⏭️ تم تخطي '{story_title}' "
-            f"لأنها موجودة بالفعل."
+            f"⏭️ تم تخطي "
+            f"'{story_title}'"
         )
 
         return
 
     # --------------------------------------------------------
-    # اسم ملف فريد لكل قصة
+    # اسم ملف آمن
     # --------------------------------------------------------
 
-    base_name = (
+    base_name = safe_filename(
         f"temp_story_"
         f"{surah_number}_"
         f"{start_ayah}_"
@@ -786,7 +1409,7 @@ async def process_story(
     try:
 
         # ----------------------------------------------------
-        # تحميل الفيديو
+        # البحث والتحميل
         # ----------------------------------------------------
 
         downloaded_file = (
@@ -799,7 +1422,7 @@ async def process_story(
         if not downloaded_file:
 
             print(
-                f"❌ فشل تحميل فيديو "
+                f"❌ فشل تحميل "
                 f"'{story_title}'"
             )
 
@@ -810,70 +1433,84 @@ async def process_story(
         ):
 
             print(
-                "❌ الملف غير موجود بعد التحميل."
+                "❌ الملف غير موجود."
             )
 
             return
 
         # ----------------------------------------------------
-        # رفع Telegram
+        # Telegram
         # ----------------------------------------------------
 
-        file_id = await upload_to_telegram(
-            bot,
-            downloaded_file,
-            f"📖 {story_title}",
+        file_id = (
+            await upload_to_telegram(
+                bot,
+                downloaded_file,
+                f"📖 {story_title}",
+            )
         )
 
         if not file_id:
 
             print(
-                "❌ فشل رفع الفيديو إلى Telegram."
+                "❌ فشل رفع الفيديو."
             )
 
             return
 
         # ----------------------------------------------------
-        # ربط الفيديو بالآيات
+        # Supabase
         # ----------------------------------------------------
 
-        success = link_story_to_supabase(
-            surah_number=surah_number,
-            start_ayah=start_ayah,
-            end_ayah=end_ayah,
-            story_title=story_title,
-            telegram_file_id=file_id,
+        success = (
+            link_story_to_supabase(
+                surah_number=surah_number,
+                start_ayah=start_ayah,
+                end_ayah=end_ayah,
+                story_title=story_title,
+                telegram_file_id=file_id,
+            )
         )
 
         if success:
 
             print()
             print(
-                f"🎉 اكتملت معالجة "
-                f"'{story_title}' بنجاح!"
+                "🎉 تم الانتهاء بنجاح!"
+            )
+            print(
+                f"📖 {story_title}"
             )
 
         else:
 
             print()
             print(
-                f"⚠️ تم رفع الفيديو إلى Telegram "
-                f"لكن حدثت مشكلة في ربط الآيات."
+                "⚠️ Telegram نجح، "
+                "لكن ربط Supabase لم يكتمل."
             )
+
+            print(
+                "🆔 احتفظ بهذا file_id:"
+            )
+            print(file_id)
 
     except Exception as e:
 
+        print()
         print(
-            f"❌ خطأ غير متوقع أثناء معالجة "
-            f"'{story_title}':\n{e}"
+            f"❌ خطأ غير متوقع "
+            f"في '{story_title}':"
         )
+
+        print(e)
 
         traceback.print_exc()
 
     finally:
 
         # ----------------------------------------------------
-        # تنظيف الملفات المؤقتة دائمًا
+        # تنظيف الملفات دائمًا
         # ----------------------------------------------------
 
         cleanup_temp_files(
@@ -882,14 +1519,16 @@ async def process_story(
 
 
 # ============================================================
-# 11. Main
+# 17. Main
 # ============================================================
 
 async def main():
 
     print()
     print("=" * 60)
-    print("📖 Quran Stories Processor")
+    print(
+        "📖 Quran Stories Processor"
+    )
     print("=" * 60)
 
     bot = Bot(
@@ -908,19 +1547,27 @@ async def main():
     finally:
 
         try:
+
             await bot.shutdown()
+
         except Exception:
+
             pass
 
     print()
     print("=" * 60)
-    print("🎉 تم إنهاء جميع العمليات!")
+    print(
+        "🎉 تم إنهاء جميع العمليات!"
+    )
     print("=" * 60)
 
 
 # ============================================================
-# 12. Entry Point
+# 18. Entry Point
 # ============================================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    asyncio.run(
+        main()
+    )
