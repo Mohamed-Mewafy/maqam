@@ -5,7 +5,7 @@ on:
 
 jobs:
   run-script:
-    runs-python: ubuntu-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -21,8 +21,10 @@ jobs:
           sudo apt-get install -y ffmpeg
 
       - name: Create Cookies File from Secrets
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
         run: |
-          echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
+          echo "$YOUTUBE_COOKIES" > cookies.txt
 
       - name: Install Python Dependencies
         run: |
