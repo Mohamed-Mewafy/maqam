@@ -150,18 +150,6 @@ async def main():
         print("\n==================================================")
         print(f"🚀 بدء معالجة: {story['story_title']}")
         
-        # فحص ما إذا كانت القصة معالجة مسبقاً لمنع التكرار
-        surah_res = supabase.from_('surahs').select('id').eq('surah_number', story['surah_number']).single().execute()
-        if surah_res.data:
-            surah_id = surah_res.data['id']
-            first_ayah = supabase.from_('ayahs').select('id').eq('surah_id', surah_id).eq('number_in_surah', story['start_ayah']).single().execute()
-            
-            if first_ayah.data:
-                existing_story = supabase.from_('ayahs_stories').select('video_url').eq('ayah_id', first_ayah.data['id']).execute()
-                if existing_story.data and len(existing_story.data) > 0 and existing_story.data[0].get('video_url'):
-                    print("⚡ القصة مضافة بالفعل من قبل. تخطي...")
-                    continue
-
         temp_file = f"temp_{story['surah_number']}_{story['start_ayah']}.mp4"
         downloaded_file = search_and_download_youtube(story['search_query'], temp_file)
         
