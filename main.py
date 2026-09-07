@@ -55,14 +55,16 @@ STORIES_MAPPING = [
 # ==================== 3. Helper Functions ====================
 
 def search_and_download_youtube(query: str, output_filename: str = "temp_video.mp4") -> str:
-    """البحث في يوتيوب وتحميل الفيديو بصيغة MP4 مع استخدام الكوكيز لتخطي الحظر"""
+    """البحث في يوتيوب وتحميل الفيديو بصيغة MP4 مع المطابقة الدقيقة لاسم الملف المحفوظ"""
     print(f"🔍 جاري البحث في يوتيوب عن: {query}")
+    
+    base_name = os.path.splitext(output_filename)[0]
     
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'merge_output_format': 'mp4',
         'default_search': 'ytsearch1:',
-        'outtmpl': output_filename,
+        'outtmpl': f'{base_name}.%(ext)s',
         'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None,
         'quiet': True,
         'noplaylist': True,
@@ -79,7 +81,6 @@ def search_and_download_youtube(query: str, output_filename: str = "temp_video.m
         }
     }
     
-    # حذف الخيار لو لم يكن الملف موجوداً محلياً
     if not ydl_opts['cookiefile']:
         del ydl_opts['cookiefile']
 
@@ -89,7 +90,20 @@ def search_and_download_youtube(query: str, output_filename: str = "temp_video.m
             if info:
                 title = info['entries'][0].get('title', 'عنوان غير معروف') if 'entries' in info and len(info['entries']) > 0 else info.get('title')
                 print(f"✅ تم تحميل الفيديو بنجاح: {title}")
-                return output_filename
+                
+                # فحص الاحتمالات المختلفة لاسم الملف المخرَج لضمان إيجاده
+                possible_paths = [
+                    f"{base_name}.mp4",
+                    output_filename,
+                    f"{output_filename}.mp4",
+                    f"{base_name}.mkv",
+                    f"{base_name}.webm"
+                ]
+                
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        return path
+
     except Exception as e:
         print(f"❌ حدث خطأ أثناء تحميل الفيديو من يوتيوب: {e}")
         traceback.print_exc()
@@ -98,7 +112,7 @@ def search_and_download_youtube(query: str, output_filename: str = "temp_video.m
 
 
 async def upload_to_telegram(bot: Bot, file_path: str, caption: str) -> str:
-    """رفع الفيديو إلى تليجرام واستخراج file_id الآمن والمستمر"""
+    """رفع الفيديو إلى تليجرام واستخراج file_id الدائم والمشفر"""
     print("📤 جاري رفع الفيديو إلى تليجرام...")
     with open(file_path, 'rb') as video_file:
         message = await bot.send_video(
@@ -114,10 +128,9 @@ async def upload_to_telegram(bot: Bot, file_path: str, caption: str) -> str:
 
 
 async def link_story_to_supabase(surah_number: int, start_ayah: int, end_ayah: int, story_title: str, telegram_file_id: str):
-    """ربط الآيات في Supabase دفعة واحدة باستخدام Upsert لتسريع الأداء"""
+    """ربط الآيات في Supabase دفعة واحدة باستخدام Upsert لتسريع العمليات"""
     print(f"🔗 جاري ربط الآيات من {start_ayah} إلى {end_ayah} في سورة رقم {surah_number}...")
     
-    # 1. جلب ID السورة
     surah_res = supabase.from_('surahs').select('id').eq('surah_number', surah_number).single().execute()
     if not surah_res.data:
         print(f"❌ لم يتم العثور على السورة رقم {surah_number}")
@@ -125,7 +138,6 @@ async def link_story_to_supabase(surah_number: int, start_ayah: int, end_ayah: i
         
     surah_id = surah_res.data['id']
 
-    # 2. جلب جميع الآيات في هذا النطاق
     ayahs_res = supabase.from_('ayahs') \
         .select('id') \
         .eq('surah_id', surah_id) \
@@ -140,7 +152,6 @@ async def link_story_to_supabase(surah_number: int, start_ayah: int, end_ayah: i
 
     print(f"📌 تم العثور على {len(ayahs)} آية لربطها بالقصة.")
 
-    # 3. إعداد البيانات المجمعة
     records = [
         {
             'ayah_id': ayah['id'],
@@ -150,7 +161,6 @@ async def link_story_to_supabase(surah_number: int, start_ayah: int, end_ayah: i
         for ayah in ayahs
     ]
     
-    # 4. حفظ البيانات دفعة واحدة (Bulk Upsert)
     supabase.from_('ayahs_stories').upsert(records, on_conflict='ayah_id').execute()
     print("✅ تم ربط جميع آيات القصة بنجاح في Supabase!")
 
@@ -177,20 +187,16 @@ async def main():
                     story_title=story['story_title'],
                     telegram_file_id=file_id
                 )
+                # تنظيف الملف بعد الانتهاء
+                if os.path.exists(downloaded_file):
+                    os.remove(downloaded_file)
             else:
-                print(f"⚠️ فشل التنزيل لـ: {story['story_title']}")
+                print(f"⚠️ فشل العثور على الملف المحمل لـ: {story['story_title']}")
                 
         except Exception as e:
             print(f"❌ حدث خطأ غير متوقع أثناء معالجة قصة '{story['story_title']}': {e}")
             traceback.print_exc()
-            
-        finally:
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except Exception:
-                    pass
-                    
+
     print("\n🎉 تم إنهاء العمل بنجاح!")
 
 if __name__ == '__main__':
